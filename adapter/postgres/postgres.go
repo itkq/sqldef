@@ -97,6 +97,10 @@ func (d *PostgresDatabase) Triggers() ([]string, error) {
 }
 
 func (d *PostgresDatabase) DumpTableDDL(table string) (string, error) {
+	tableComment, err := d.getTableComment(table)
+	if err != nil {
+		return "", err
+	}
 	cols, err := d.getColumns(table)
 	if err != nil {
 		return "", err
@@ -117,10 +121,10 @@ func (d *PostgresDatabase) DumpTableDDL(table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return buildDumpTableDDL(table, cols, pkeyCols, indexDefs, foreginDefs, policyDefs), nil
+	return buildDumpTableDDL(table, tableComment, cols, pkeyCols, indexDefs, foreginDefs, policyDefs), nil
 }
 
-func buildDumpTableDDL(table string, columns []column, pkeyCols, indexDefs, foreginDefs, policyDefs []string) string {
+func buildDumpTableDDL(table string, tableComment string, columns []column, pkeyCols, indexDefs, foreginDefs, policyDefs []string) string {
 	var queryBuilder strings.Builder
 	fmt.Fprintf(&queryBuilder, "CREATE TABLE %s (", table)
 	for i, col := range columns {
@@ -159,6 +163,14 @@ func buildDumpTableDDL(table string, columns []column, pkeyCols, indexDefs, fore
 	for _, v := range policyDefs {
 		fmt.Fprintf(&queryBuilder, "%s;\n", v)
 	}
+	if tableComment != "" {
+		fmt.Fprintf(&queryBuilder, "COMMENT ON TABLE %s IS '%s'\n", table, tableComment)
+	}
+	for _, v := range columns {
+		if v.Comment != "" {
+			fmt.Fprintf(&queryBuilder, "COMMENT ON COLUMN %s.%s IS '%s'\n", table, v.Name, v.Comment)
+		}
+	}
 	return strings.TrimSuffix(queryBuilder.String(), "\n")
 }
 
@@ -171,6 +183,7 @@ type column struct {
 	IsAutoIncrement    bool
 	Check              string
 	IdentityGeneration string
+	Comment            string
 }
 
 func (c *column) GetDataType() string {
@@ -203,17 +216,43 @@ func (c *column) GetDataType() string {
 	}
 }
 
+func (d *PostgresDatabase) getTableComment(table string) (string, error) {
+	const query = `select pg_catalog.obj_description(st.oid) from information_schema.tables as t
+			left join pg_catalog.pg_class st on st.relname = t.table_name
+			where t.table_schema = $1 and t.table_name = $2;`
+
+	schema, table := splitTableName(table)
+	rows, err := d.db.Query(query, schema, table)
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer rows.Close()
+
+	rows.Next()
+	var comment *string
+	if err := rows.Scan(&comment); err != nil {
+		return "", err
+	}
+
+	if comment != nil {
+		return *comment, nil
+	}
+
+	return "", nil
+}
+
 func (d *PostgresDatabase) getColumns(table string) ([]column, error) {
 	const query = `SELECT s.column_name, s.column_default, s.is_nullable, s.character_maximum_length,
 	CASE WHEN s.data_type IN ('ARRAY', 'USER-DEFINED') THEN format_type(f.atttypid, f.atttypmod) ELSE s.data_type END,
 	CASE WHEN pc.contype = 'c' THEN pg_get_constraintdef(pc.oid, true) ELSE NULL END AS check,
-	s.identity_generation
+	s.identity_generation, pd.description
 FROM pg_attribute f
 	JOIN pg_class c ON c.oid = f.attrelid JOIN pg_type t ON t.oid = f.atttypid
 	LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = f.attnum
 	LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN pg_constraint p ON p.conrelid = c.oid AND f.attnum = ANY (p.conkey) AND p.contype = 'u'
 	LEFT JOIN pg_constraint pc ON pc.conrelid = c.oid AND f.attnum = ANY (pc.conkey) AND pc.contype = 'c'
+	LEFT JOIN pg_description pd ON pd.objoid = f.attrelid AND pd.objsubid = f.attnum
 	LEFT JOIN information_schema.columns s ON s.column_name=f.attname AND s.table_name = c.relname
 WHERE c.relkind = 'r'::char AND n.nspname = $1 AND c.relname = $2 AND f.attnum > 0 ORDER BY f.attnum;`
 
@@ -228,8 +267,8 @@ WHERE c.relkind = 'r'::char AND n.nspname = $1 AND c.relname = $2 AND f.attnum >
 	for rows.Next() {
 		col := column{}
 		var colName, isNullable, dataType string
-		var maxLenStr, colDefault, check, idGen *string
-		err = rows.Scan(&colName, &colDefault, &isNullable, &maxLenStr, &dataType, &check, &idGen)
+		var maxLenStr, colDefault, check, idGen, comment *string
+		err = rows.Scan(&colName, &colDefault, &isNullable, &maxLenStr, &dataType, &check, &idGen, &comment)
 		if err != nil {
 			return nil, err
 		}
@@ -255,6 +294,9 @@ WHERE c.relkind = 'r'::char AND n.nspname = $1 AND c.relname = $2 AND f.attnum >
 		}
 		if idGen != nil {
 			col.IdentityGeneration = *idGen
+		}
+		if comment != nil {
+			col.Comment = *comment
 		}
 		cols = append(cols, col)
 	}
@@ -391,7 +433,7 @@ func (d *PostgresDatabase) getPolicyDefs(table string) ([]string, error) {
 		if withCheck.Valid {
 			def += fmt.Sprintf(" WITH CHECK %s", withCheck.String)
 		}
-		defs = append(defs, def + ";")
+		defs = append(defs, def+";")
 	}
 	return defs, nil
 }
