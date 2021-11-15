@@ -163,12 +163,13 @@ func buildDumpTableDDL(table string, tableComment string, columns []column, pkey
 	for _, v := range policyDefs {
 		fmt.Fprintf(&queryBuilder, "%s;\n", v)
 	}
+	_, table = splitTableName(table)
 	if tableComment != "" {
-		fmt.Fprintf(&queryBuilder, "COMMENT ON TABLE %s IS '%s'\n", table, tableComment)
+		fmt.Fprintf(&queryBuilder, "COMMENT ON TABLE %s IS '%s';\n", table, tableComment)
 	}
 	for _, v := range columns {
 		if v.Comment != "" {
-			fmt.Fprintf(&queryBuilder, "COMMENT ON COLUMN %s.%s IS '%s'\n", table, v.Name, v.Comment)
+			fmt.Fprintf(&queryBuilder, "COMMENT ON COLUMN %s.%s IS '%s';\n", table, v.Name, v.Comment)
 		}
 	}
 	return strings.TrimSuffix(queryBuilder.String(), "\n")
